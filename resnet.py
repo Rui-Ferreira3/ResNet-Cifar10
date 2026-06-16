@@ -34,6 +34,14 @@ import torch.nn.init as init
 
 from torch.autograd import Variable
 
+from histogram import ConvDataCollector
+
+_collector: ConvDataCollector | None = None
+
+def set_collector(c: ConvDataCollector | None):
+    global _collector
+    _collector = c
+
 __all__ = ['ResNet', 'resnet20', 'resnet32', 'resnet44', 'resnet56', 'resnet110', 'resnet1202']
 
 def _weights_init(m):
@@ -76,10 +84,15 @@ class BasicBlock(nn.Module):
                 )
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = x
+        out = _collector.conv_call(self.conv1, out) if _collector is not None else self.conv1(out)
+        out = _collector.bn_call(self.bn1, out) if _collector is not None else self.bn1(out)
+        out = _collector.relu_call(F.relu, out) if _collector is not None else F.relu(out)
+
+        out = _collector.conv_call(self.conv2, out) if _collector is not None else self.conv2(out)
+        out = _collector.bn_call(self.bn2, out) if _collector is not None else self.bn2(out)
         out += self.shortcut(x)
-        out = F.relu(out)
+        out = _collector.shortcut_call(F.relu, out) if _collector is not None else F.relu(out)
         return out
 
 
@@ -107,10 +120,15 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
+        out = x
+        out = _collector.conv_call(self.conv1, out) if _collector is not None else self.conv1(out)
+        out = _collector.bn_call(self.bn1, out) if _collector is not None else self.bn1(out)
+        out = _collector.relu_call(F.relu, out) if _collector is not None else F.relu(out)
+
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
+
         out = F.avg_pool2d(out, out.size()[3])
         out = out.view(out.size(0), -1)
         out = self.linear(out)

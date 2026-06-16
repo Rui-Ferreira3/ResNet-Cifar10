@@ -1,6 +1,7 @@
 import argparse
 import os
 import shutil
+import sys
 import time
 
 import torch
@@ -13,12 +14,13 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import resnet
 
+HIST_NAME = f'histograms/hist.png'
+default_device = "cpu"
+
 model_names = sorted(name for name in resnet.__dict__
     if name.islower() and not name.startswith("__")
                      and name.startswith("resnet")
                      and callable(resnet.__dict__[name]))
-
-print(model_names)
 
 parser = argparse.ArgumentParser(description='Propert ResNets for CIFAR10 in pytorch')
 parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
@@ -55,20 +57,35 @@ parser.add_argument('--save-dir', dest='save_dir',
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
                     type=int, default=10)
+parser.add_argument('--test', dest='test', action='store_true',
+                    help='Test trained model')
+parser.add_argument('--hist', dest='hist', action='store_true',
+                    help='Save conv weight/input/output histograms as PNG after each epoch')
+parser.add_argument('-m', '--model', dest='model',
+                    help='The filename of the trained model',
+                    default='model.th', type=str)
+parser.add_argument('--sim', dest='sim', action='store_true',
+                    help='Use accelerator simulator for inference')
 best_prec1 = 0
 
 
 def main():
     global args, best_prec1
-    args = parser.parse_args()
-
 
     # Check the save_dir exists or not
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
-    model = torch.nn.DataParallel(resnet.__dict__[args.arch]())
-    model.cuda()
+    model = resnet.__dict__[args.arch]()
+    if args.sim:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../AxCConvDevice-pytorch'))
+        import AxCConv
+        device = "cpu"
+    else:
+        device = torch.device(default_device)
+        model = torch.nn.DataParallel(model) if default_device == "cuda" else model
+
+    model.to(device)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -96,7 +113,7 @@ def main():
             normalize,
         ]), download=True),
         batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=True)
+        num_workers=args.workers, pin_memory=False)
 
     val_loader = torch.utils.data.DataLoader(
         datasets.CIFAR10(root='./data', train=False, transform=transforms.Compose([
@@ -104,10 +121,40 @@ def main():
             normalize,
         ])),
         batch_size=128, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+        num_workers=args.workers, pin_memory=False)
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda()
+    criterion = nn.CrossEntropyLoss().to(device)
+
+    # Check if in test mode
+    if args.test:
+        # Check if pre trained module exists
+        if args.pretrained:
+            model_path = f"./pretrained_models/{args.arch}.th"
+        else:
+            model_path = args.model
+        assert os.path.isfile(model_path), f"Model '{model_path}' does not exist"
+        if args.sim:
+            print(f"Testing medel '{model_path}' on simulator")
+        else:
+            print(f"Testing medel '{model_path}' on {default_device}")
+
+        collector = resnet.ConvDataCollector() if args.hist else None
+
+        trained_model = torch.load(model_path, weights_only=True)
+        if args.sim or not isinstance(model, torch.nn.DataParallel):
+            state_dict = {k.replace('module.', ''): v for k, v in trained_model['state_dict'].items()}
+            model.load_state_dict(state_dict)
+        else:
+            model.load_state_dict(trained_model['state_dict'])
+        model.training = False
+
+        start = time.time()
+        top1, collector = validate(val_loader, model, criterion, collector=collector)
+        t = time.time() - start
+        print(f"Total inference time: {t:.3f} seconds")
+
+        return t, top1, collector
 
     if args.half:
         model.half()
@@ -139,7 +186,7 @@ def main():
         lr_scheduler.step()
 
         # evaluate on validation set
-        prec1 = validate(val_loader, model, criterion)
+        prec1, _ = validate(val_loader, model, criterion)
 
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
@@ -169,6 +216,9 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
     # switch to train mode
     model.train()
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
 
     end = time.time()
     for i, (input, target) in enumerate(train_loader):
@@ -176,8 +226,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        target = target.cuda()
-        input_var = input.cuda()
+        target = target.to(device)
+        input_var = input.to(device)
         target_var = target
         if args.half:
             input_var = input_var.half()
@@ -212,7 +262,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
                       data_time=data_time, loss=losses, top1=top1))
 
 
-def validate(val_loader, model, criterion):
+def validate(val_loader, model, criterion, collector=None):
     """
     Run evaluation
     """
@@ -223,18 +273,33 @@ def validate(val_loader, model, criterion):
     # switch to evaluate mode
     model.eval()
 
+    if args.sim:
+        device = "cpu"
+        mydevice = torch.device("axcconvdevice")
+        hooks = register_device_hooks(model, mydevice)
+    else:
+        device = torch.device(default_device)
+
     end = time.time()
     with torch.no_grad():
         for i, (input, target) in enumerate(val_loader):
-            target = target.cuda()
-            input_var = input.cuda()
-            target_var = target.cuda()
+            target = target.to(device)
+            input_var = input.to(device)
+            target_var = target.to(device)
 
             if args.half:
                 input_var = input_var.half()
 
+            # enable collector on first batch only
+            if collector is not None and i == 0:
+                resnet.set_collector(collector)
+
             # compute output
             output = model(input_var)
+
+            if collector is not None and i == 0:
+                resnet.set_collector(None)
+
             loss = criterion(output, target_var)
 
             output = output.float()
@@ -257,10 +322,13 @@ def validate(val_loader, model, criterion):
                           i, len(val_loader), batch_time=batch_time, loss=losses,
                           top1=top1))
 
-    print(' * Prec@1 {top1.avg:.3f}'
-          .format(top1=top1))
+    print(' * Prec@1 {top1.avg:.3f}'.format(top1=top1))
 
-    return top1.avg
+    if args.sim:
+        for h in hooks:
+            h.remove()
+
+    return top1.avg, collector
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     """
@@ -301,6 +369,52 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
+def register_device_hooks(model, device):
+    hooks = []
+    conv_modules = [m for m in model.modules() if isinstance(m, torch.nn.Conv2d)]
+
+    def make_hooks(mod):
+        def pre_hook(mod, inputs):
+            x = inputs[0]
+            if mod.weight.device.type != device:
+                mod.weight = torch.nn.Parameter(mod.weight.detach().to(device), requires_grad=False)
+                if mod.bias is not None:
+                    mod.bias = torch.nn.Parameter(mod.bias.detach().to(device), requires_grad=False)
+            return (x.to(device),)
+
+        def post_hook(_mod, _inputs, output):
+            return output.to('cpu')
+
+        return pre_hook, post_hook
+
+    for module in conv_modules:
+        pre, post = make_hooks(module)
+        hooks.append(module.register_forward_pre_hook(pre))
+        hooks.append(module.register_forward_hook(post))
+
+    return hooks
 
 if __name__ == '__main__':
-    main()
+    torch.multiprocessing.set_start_method('spawn', force=True)
+    global args
+    args = parser.parse_args()
+
+    if not args.test:
+        print("Training model")
+        main()
+    else:
+        _, top1_sim, collector_sim = main()
+
+        args.sim = False
+
+        _, top1_float, collector_float = main()
+
+        os.makedirs('histograms', exist_ok=True)
+        if collector_sim is not None and collector_float is not None:
+            collector_sim.plot_histograms_overlay(
+                collector_float,
+                save_path=HIST_NAME,
+                title=f'Sim Top-1: {top1_sim:.3f}%  vs  Float Top-1: {top1_float:.3f}%',
+            )
+        elif collector_sim is not None:
+            collector_sim.plot_histograms(save_path=HIST_NAME, title=f'Sim Top-1: {top1_sim:.3f}%')

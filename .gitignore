@@ -1,0 +1,8 @@
+*.so
+*.o
+.vscode
+.zed
+__pycache__
+data/
+*checkpoint.th
+save_temp/
