@@ -23,10 +23,10 @@ model_names = sorted(name for name in resnet.__dict__
                      and callable(resnet.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='Propert ResNets for CIFAR10 in pytorch')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
+parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet20',
                     choices=model_names,
                     help='model architecture: ' + ' | '.join(model_names) +
-                    ' (default: resnet32)')
+                    ' (default: resnet20)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=200, type=int, metavar='N',
@@ -47,8 +47,6 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
-parser.add_argument('--pretrained', dest='pretrained', action='store_true',
-                    help='use pre-trained model')
 parser.add_argument('--half', dest='half', action='store_true',
                     help='use half-precision(16-bit) ')
 parser.add_argument('--save-dir', dest='save_dir',
@@ -57,20 +55,24 @@ parser.add_argument('--save-dir', dest='save_dir',
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
                     type=int, default=10)
-parser.add_argument('--test', dest='test', action='store_true',
-                    help='Test trained model')
+parser.add_argument('--train', dest='train', action='store_true',
+                    help='Trained model')
 parser.add_argument('--hist', dest='hist', action='store_true',
                     help='Save conv weight/input/output histograms as PNG after each epoch')
 parser.add_argument('-m', '--model', dest='model',
                     help='The filename of the trained model',
-                    default='model.th', type=str)
+                    default=None, type=str)
 parser.add_argument('--sim', dest='sim', action='store_true',
                     help='Use accelerator simulator for inference')
 best_prec1 = 0
+pretrained = True
 
+def run(cli_args=None, conv_fw=None):
+    global args, best_prec1, pretrained
+    args = parser.parse_args(cli_args)
 
-def main():
-    global args, best_prec1
+    if args.model is not None:
+        pretrained = False
 
     # Check the save_dir exists or not
     if not os.path.exists(args.save_dir):
@@ -127,9 +129,9 @@ def main():
     criterion = nn.CrossEntropyLoss().to(device)
 
     # Check if in test mode
-    if args.test:
+    if not args.train:
         # Check if pre trained module exists
-        if args.pretrained:
+        if pretrained:
             model_path = f"./pretrained_models/{args.arch}.th"
         else:
             model_path = args.model
@@ -141,7 +143,7 @@ def main():
 
         collector = resnet.ConvDataCollector() if args.hist else None
 
-        trained_model = torch.load(model_path, weights_only=True)
+        trained_model = torch.load(model_path, weights_only=True, map_location=device)
         if args.sim or not isinstance(model, torch.nn.DataParallel):
             state_dict = {k.replace('module.', ''): v for k, v in trained_model['state_dict'].items()}
             model.load_state_dict(state_dict)
@@ -396,18 +398,13 @@ def register_device_hooks(model, device):
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn', force=True)
-    global args
-    args = parser.parse_args()
 
-    if not args.test:
-        print("Training model")
-        main()
-    else:
-        _, top1_sim, collector_sim = main()
+    _, top1_sim, collector_sim = run()
 
+    if args.hist:
         args.sim = False
 
-        _, top1_float, collector_float = main()
+        _, top1_float, collector_float = run()
 
         os.makedirs('histograms', exist_ok=True)
         if collector_sim is not None and collector_float is not None:
