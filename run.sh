@@ -1,7 +1,7 @@
 #!/bin/bash
 # ./run.sh -t -s -m modelA.th
 
-MODE="train"
+MODE="test"
 PROF_FILE="output.prof"
 MODEL="model.th"
 ARCH="resnet20"
@@ -13,9 +13,9 @@ ARGS=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -t|--test)
-            MODE="test"
-            ARGS="$ARGS --test"
+        -t|--train)
+            MODE="train"
+            ARGS="$ARGS --train"
             shift 1
             ;;
         -p|--prof)
@@ -105,9 +105,9 @@ done
 ARGS="$ARGS --arch $ARCH --model ./save_$ARCH/$MODEL"
 
 if [ "$MODE" = "train" ]; then
-    python trainer.py $ARGS  --lr $LR --save-dir ./save_$ARCH --epochs $EPOCHS 
+    python run.py $ARGS  --lr $LR --save-dir ./save_$ARCH --epochs $EPOCHS 
 elif [ "$MODE" = "test" ]; then
-    python trainer.py $ARGS
+    python run.py $ARGS
 elif [ "$MODE" = "profile" ]; then
     mkdir -p ./prof
     python -m cProfile -o ./prof/$PROF_FILE trainer.py $ARGS
