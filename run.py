@@ -12,6 +12,8 @@ import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+from torchsummary import summary
+from tqdm import tqdm
 import resnet
 
 HIST_NAME = f'histograms/hist.png'
@@ -67,7 +69,7 @@ parser.add_argument('--sim', dest='sim', action='store_true',
 best_prec1 = 0
 pretrained = True
 
-def run(cli_args=None, conv_fw=None):
+def run(cli_args=None, conv2d=None):
     global args, best_prec1, pretrained
     args = parser.parse_args(cli_args)
 
@@ -88,6 +90,10 @@ def run(cli_args=None, conv_fw=None):
         model = torch.nn.DataParallel(model) if default_device == "cuda" else model
 
     model.to(device)
+
+    if conv2d is not None:
+        print("Replacing conv2d to use hw")
+        model = replace_conv2d(model, conv2d)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -282,49 +288,41 @@ def validate(val_loader, model, criterion, collector=None):
     else:
         device = torch.device(default_device)
 
-    end = time.time()
+    running_top1_corrects = 0
+    processed_data = 0
+    pbar = tqdm(val_loader, desc='Validating')
     with torch.no_grad():
-        for i, (input, target) in enumerate(val_loader):
-            target = target.to(device)
-            input_var = input.to(device)
-            target_var = target.to(device)
-
-            if args.half:
-                input_var = input_var.half()
+        for inputs, labels in pbar:
+            labels = labels.to(device)
+            inputs = inputs.to(device)
 
             # enable collector on first batch only
             if collector is not None and i == 0:
                 resnet.set_collector(collector)
 
             # compute output
-            output = model(input_var)
+            outputs = model(inputs)
 
             if collector is not None and i == 0:
                 resnet.set_collector(None)
 
-            loss = criterion(output, target_var)
+            loss = criterion(outputs, labels)
 
-            output = output.float()
+            outputs = outputs.float()
             loss = loss.float()
 
             # measure accuracy and record loss
-            prec1 = accuracy(output.data, target)[0]
-            losses.update(loss.item(), input.size(0))
-            top1.update(prec1.item(), input.size(0))
+            prec1 = accuracy(outputs.data, labels)[0]
+            losses.update(loss.item(), inputs.size(0))
+            top1.update(prec1.item(), inputs.size(0))
 
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
+            processed_data += inputs.size(0)
 
-            if i % args.print_freq == 0:
-                print('Test: [{0}/{1}]\t'
-                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-                          i, len(val_loader), batch_time=batch_time, loss=losses,
-                          top1=top1))
+            pbar.set_postfix({
+                'loss': f'{losses.avg:.4f}',
+                'top1': f'{top1.avg*100:.2f}%',
+            })
 
-    print(' * Prec@1 {top1.avg:.3f}'.format(top1=top1))
 
     if args.sim:
         for h in hooks:
@@ -354,7 +352,6 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
-
 
 def accuracy(output, target, topk=(1,)):
     """Computes the precision@k for the specified values of k"""
@@ -395,6 +392,30 @@ def register_device_hooks(model, device):
         hooks.append(module.register_forward_hook(post))
 
     return hooks
+
+def replace_conv2d(model, conv2d_cls):
+    for name, module in model.named_children():
+        if isinstance(module, nn.Conv2d) and not isinstance(module, conv2d_cls):
+            new_conv = conv2d_cls(
+                in_channels=module.in_channels,
+                out_channels=module.out_channels,
+                kernel_size=module.kernel_size,
+                stride=module.stride,
+                padding=module.padding,
+                dilation=module.dilation,
+                groups=module.groups,
+                bias=(module.bias is not None),
+                padding_mode=module.padding_mode,
+            )
+            new_conv.weight.data = module.weight.data.clone()
+            if module.bias is not None:
+                new_conv.bias.data = module.bias.data.clone()
+
+            setattr(model, name, new_conv)
+        else:
+            # recurse into children (handles nested Sequential, BasicBlock, etc.)
+            replace_conv2d(module, conv2d_cls)
+    return model
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn', force=True)
