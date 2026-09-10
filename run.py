@@ -82,7 +82,7 @@ def run(cli_args=None, conv2d=None):
 
     model = resnet.__dict__[args.arch]()
     if args.sim:
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../AxCConvDevice-pytorch'))
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../IdxedAccum/sw'))
         import AxCConv
         device = "cpu"
     else:
@@ -292,7 +292,7 @@ def validate(val_loader, model, criterion, collector=None):
     processed_data = 0
     pbar = tqdm(val_loader, desc='Validating')
     with torch.no_grad():
-        for inputs, labels in pbar:
+        for i, (inputs, labels) in enumerate(pbar):
             labels = labels.to(device)
             inputs = inputs.to(device)
 
@@ -320,7 +320,7 @@ def validate(val_loader, model, criterion, collector=None):
 
             pbar.set_postfix({
                 'loss': f'{losses.avg:.4f}',
-                'top1': f'{top1.avg*100:.2f}%',
+                'top1': f'{top1.avg:.2f}%',
             })
 
 

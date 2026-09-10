@@ -102,10 +102,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ARGS="$ARGS --arch $ARCH --model ./save_$ARCH/$MODEL"
+ARGS="$ARGS --arch $ARCH"
 
 if [ "$MODE" = "train" ]; then
-    python run.py $ARGS  --lr $LR --save-dir ./save_$ARCH --epochs $EPOCHS 
+    python run.py $ARGS  --model ./save_$ARCH/$MODEL  --lr $LR --save-dir ./save_$ARCH --epochs $EPOCHS 
 elif [ "$MODE" = "test" ]; then
     python run.py $ARGS
 elif [ "$MODE" = "profile" ]; then
